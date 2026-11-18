@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- Not loaded by the extension. Host this anywhere over https and put the
+     URL in CONFIG.uninstallUrl (shared.js). Brave opens it after removal. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Doomed Scroller removed</title>
+  <style>
+    :root { --bg: #f6f6f9; --card: #fff; --fg: #16161d; --muted: #555; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #111116; --card: #1c1c24; --fg: #ececf1; --muted: #a9a9b6; }
+    }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+           padding: 16px; box-sizing: border-box; background: var(--bg); color: var(--fg);
+           font: 17px/1.6 system-ui, sans-serif; }
+    main { max-width: 520px; background: var(--card); border-radius: 14px; padding: 32px; }
+    h1 { margin: 0 0 12px; font-size: 24px; }
+    p { color: var(--muted); }
+    ol { padding-left: 20px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>You just removed Doomed Scroller.</h1>
+    <p>If that was a calm, deliberate decision, fine. Close this tab.</p>
+    <p>If it was the urge talking, before you open the feed:</p>
+    <ol>
+      <li>Stand up. Get a glass of water.</li>
+      <li>Wait 10 minutes. The urge peaks and fades.</li>
+      <li>If you still want it after that, ask: what was I avoiding just now?</li>
+    </ol>
+    <p>Reinstalling takes 30 seconds: <code>brave://extensions</code> &rarr; Load unpacked.</p>
+  </main>
+</body>
+</html>

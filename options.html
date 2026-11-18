@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Doomed Scroller settings</title>
+  <style>
+    body { margin: 0; padding: 32px 16px; font: 15px/1.5 system-ui, sans-serif;
+           color: #16161d; background: #f6f6f9; }
+    main { max-width: 520px; margin: 0 auto; background: #fff; border-radius: 12px;
+           padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,.06); }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: #666; margin: 0 0 20px; }
+    .banner { padding: 12px; border-radius: 8px; margin-bottom: 18px; }
+    .banner.pending { background: #fff4e0; color: #7a4a00; }
+    label { display: grid; grid-template-columns: 1fr 110px; align-items: center;
+            gap: 12px; padding: 8px 0; border-bottom: 1px solid #eee; }
+    label small { display: block; color: #777; }
+    input { font: inherit; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; width: 100%; box-sizing: border-box; }
+    input[aria-invalid="true"] { border-color: #b3261e; }
+    .row { display: flex; gap: 10px; margin-top: 18px; }
+    button { padding: 9px 14px; border-radius: 8px; border: 0; font: inherit; font-weight: 600; cursor: pointer; }
+    .primary { background: #16161d; color: #fff; }
+    .secondary { background: #e6e6ec; color: #16161d; }
+    .errors { color: #b3261e; margin: 12px 0 0; padding-left: 18px; }
+    .status { color: #2a7a3a; margin-top: 12px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Limits</h1>
+    <p class="sub">Changes take effect <strong id="cooloff"></strong> after you save. This is deliberate.</p>
+    <div class="banner pending" id="pending" hidden></div>
+    <form id="form" novalidate>
+      <label>Warn after (minutes active)<input name="baseMinutes" type="number" inputmode="numeric"></label>
+      <label>&hellip;and (screens scrolled)<input name="baseScreens" type="number" inputmode="numeric"></label>
+      <label><span>Each extension adds (minutes)</span><input name="extendMinutes" type="number" inputmode="numeric"></label>
+      <label><span>Each extension adds (screens)</span><input name="extendScreens" type="number" inputmode="numeric"></label>
+      <label><span>Extensions before block<small>Then blocked until midnight</small></span><input name="maxExtensions" type="number" inputmode="numeric"></label>
+      <ul class="errors" id="errors" hidden></ul>
+      <div class="row">
+        <button class="primary" type="submit">Save (applies in <span id="cooloff2"></span>)</button>
+        <button class="secondary" type="button" id="cancel" hidden>Cancel pending change</button>
+      </div>
+      <div class="status" id="status" hidden></div>
+    </form>
+  </main>
+  <script src="shared.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

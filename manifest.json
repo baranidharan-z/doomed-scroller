@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Doomed Scroller",
+  "version": "0.1.0",
+  "description": "Measures doomscrolling (time + scroll depth) on YouTube, Reddit and LinkedIn; warns, then blocks.",
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://*.reddit.com/*",
+        "*://*.linkedin.com/*"
+      ],
+      "js": ["shared.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "Doomed Scroller",
+    "default_popup": "popup.html"
+  }
+}

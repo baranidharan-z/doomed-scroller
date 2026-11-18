@@ -1,0 +1,7 @@
+node_modules/
+# Packed extensions and their signing keys. Never commit a .pem.
+*.crx
+*.pem
+*.zip
+.DS_Store
+Thumbs.db

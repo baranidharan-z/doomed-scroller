@@ -1,0 +1,13 @@
+{
+  "name": "doomed-scroller",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser extension that measures doomscrolling (time + scroll depth), warns, then blocks.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
