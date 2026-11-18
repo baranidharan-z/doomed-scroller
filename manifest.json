@@ -2,8 +2,12 @@
   "manifest_version": 3,
   "name": "Doomed Scroller",
   "version": "0.1.0",
-  "description": "Measures doomscrolling (time + scroll depth) on YouTube, Reddit and LinkedIn; warns, then blocks.",
+  "description": "Tracks time wasted on YouTube, Reddit and LinkedIn, shows philosophy to read instead, warns, then blocks.",
   "permissions": ["storage"],
+  "host_permissions": [
+    "https://philosophyapi.pythonanywhere.com/*",
+    "https://www.stoic-quotes.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },

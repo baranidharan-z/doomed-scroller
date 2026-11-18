@@ -44,8 +44,8 @@
     const at = new Date(lastPending.effectiveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const v = lastPending.values;
     pendingEl.textContent =
-      `Pending: ${v.baseMinutes} min + ${v.baseScreens} screens, +${v.extendMinutes} min / ` +
-      `+${v.extendScreens} screens per extension, ${v.maxExtensions} extensions. ` +
+      `Pending: warn after ${v.baseMinutes} min, +${v.extendMinutes} min per extension, ` +
+      `${v.maxExtensions} extensions. ` +
       `Applies at ${at} (in ${fmtDuration(left)}).`;
     pendingEl.hidden = false;
     cancelBtn.hidden = false;

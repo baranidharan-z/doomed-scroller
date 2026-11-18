@@ -16,8 +16,8 @@
     const state = DS.stateOf(rec, cfg, now);
     const cells = [
       site,
-      `${Math.round(rec.activeMs / 60000)}/${Math.round(t.ms / 60000)}m`,
-      `${Math.round(rec.screens)}/${t.screens}`,
+      `${Math.floor(rec.activeMs / 60000)}m`,
+      `${Math.max(0, Math.ceil((t.ms - rec.activeMs) / 60000))}m`,
       `${rec.extensions}/${cfg.maxExtensions}`,
       state,
     ];
@@ -33,7 +33,7 @@
   }
 
   let foot =
-    `Warns when both time and screens hit the limit. ` +
+    `Warns after ${cfg.baseMinutes} min a day per site. ` +
     `Blocks after ${cfg.maxExtensions} extensions.`;
   if (settings.pending) {
     const at = new Date(settings.pending.effectiveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

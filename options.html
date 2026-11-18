@@ -32,10 +32,8 @@
     <p class="sub">Changes take effect <strong id="cooloff"></strong> after you save. This is deliberate.</p>
     <div class="banner pending" id="pending" hidden></div>
     <form id="form" novalidate>
-      <label>Warn after (minutes active)<input name="baseMinutes" type="number" inputmode="numeric"></label>
-      <label>&hellip;and (screens scrolled)<input name="baseScreens" type="number" inputmode="numeric"></label>
+      <label>Warn after (minutes wasted)<input name="baseMinutes" type="number" inputmode="numeric"></label>
       <label><span>Each extension adds (minutes)</span><input name="extendMinutes" type="number" inputmode="numeric"></label>
-      <label><span>Each extension adds (screens)</span><input name="extendScreens" type="number" inputmode="numeric"></label>
       <label><span>Extensions before block<small>Then blocked until midnight</small></span><input name="maxExtensions" type="number" inputmode="numeric"></label>
       <ul class="errors" id="errors" hidden></ul>
       <div class="row">

@@ -118,6 +118,89 @@ function handleCancelPending() {
   });
 }
 
+// ---- philosophy quotes -----------------------------------------------------
+// Pool of quotes fetched from two free APIs, stored locally and refreshed about
+// once a day. Fetches happen here (not in content scripts) so the page's CORS
+// rules don't apply; manifest host_permissions cover both hosts. Nothing about
+// the user is sent: these are plain GET requests with no parameters but a page
+// number. With CONFIG.onlineQuotes = false no request is ever made.
+
+const QUOTES_KEY = 'quotes';
+const FETCH_TIMEOUT_MS = 8000;
+const PHILOSOPHYAPI_PAGES = 17; // 254 quotes at 15 per page, as of 2026-11
+
+const QUOTE_SOURCES = [
+  {
+    name: 'philosophyapi',
+    url: () => 'https://philosophyapi.pythonanywhere.com/api/ideas/?format=json&page=' +
+      (1 + Math.floor(Math.random() * PHILOSOPHYAPI_PAGES)),
+    parse: DS.parsePhilosophyApi,
+  },
+  {
+    name: 'stoic-quotes',
+    url: () => 'https://www.stoic-quotes.com/api/quotes?num=20',
+    parse: DS.parseStoic,
+  },
+];
+
+async function fetchJson(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, credentials: 'omit' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+let refilling = false; // in-memory guard; attemptAt in storage survives worker restarts
+
+async function refillQuotes() {
+  if (refilling) return;
+  refilling = true;
+  try {
+    const now = Date.now();
+    // Claim the attempt first so other tabs' requests don't start another.
+    const go = await serialized(async () => {
+      const stored = (await chrome.storage.local.get(QUOTES_KEY))[QUOTES_KEY];
+      if (!DS.needsRefill(stored, now, DS.CONFIG)) return false;
+      await chrome.storage.local.set({ [QUOTES_KEY]: { ...(stored || {}), attemptAt: now } });
+      return true;
+    });
+    if (!go) return;
+
+    const results = await Promise.allSettled(QUOTE_SOURCES.map(async (src) => src.parse(await fetchJson(src.url()))));
+    const incoming = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') incoming.push(...r.value);
+      else console.warn('[doomed] quote source failed', { source: QUOTE_SOURCES[i].name, error: String(r.reason) });
+    });
+
+    await serialized(async () => {
+      const stored = (await chrome.storage.local.get(QUOTES_KEY))[QUOTES_KEY] || {};
+      const items = DS.mergePool(stored.items, incoming);
+      await chrome.storage.local.set({
+        [QUOTES_KEY]: { items, attemptAt: now, fetchedAt: incoming.length ? now : stored.fetchedAt || 0 },
+      });
+      console.info('[doomed] quotes refreshed', { added: incoming.length, pool: items.length });
+    });
+  } finally {
+    refilling = false;
+  }
+}
+
+function handleGetQuote() {
+  return serialized(async () => {
+    const stored = (await chrome.storage.local.get(QUOTES_KEY))[QUOTES_KEY];
+    // Top up in the background; the reply doesn't wait for the network.
+    refillQuotes().catch((e) => console.error('[doomed] quote refill failed', e));
+    const pool = stored && Array.isArray(stored.items) ? stored.items : [];
+    return { quote: DS.pickQuote(pool, Date.now()) };
+  });
+}
+
 async function pruneOldDays() {
   const all = await chrome.storage.local.get(null);
   const cutoff = DS.dayKey(Date.now() - DS.CONFIG.retainDays * 24 * 60 * 60 * 1000);
@@ -141,6 +224,7 @@ const HANDLERS = {
   getSettings: handleGetSettings,
   proposeLimits: handleProposeLimits,
   cancelPending: handleCancelPending,
+  getQuote: handleGetQuote,
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

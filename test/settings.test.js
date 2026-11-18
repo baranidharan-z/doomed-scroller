@@ -5,7 +5,7 @@ const DS = require('../shared.js');
 
 const H = 60 * 60 * 1000;
 const NOW = new Date(2026, 10, 18, 12, 0, 0).getTime();
-const GOOD = { baseMinutes: 20, baseScreens: 40, extendMinutes: 5, extendScreens: 10, maxExtensions: 2 };
+const GOOD = { baseMinutes: 20, extendMinutes: 5, maxExtensions: 2 };
 
 test('cool-off is 2 hours', () => {
   assert.equal(DS.CONFIG.coolOffMs, 2 * H);
@@ -18,13 +18,13 @@ test('validateLimits accepts in-range integers, including numeric strings from a
 });
 
 test('validateLimits rejects out-of-range, fractional and missing values', () => {
-  const r = DS.validateLimits({ ...GOOD, baseMinutes: 0, baseScreens: 2.5, maxExtensions: undefined });
+  const r = DS.validateLimits({ ...GOOD, baseMinutes: 0, extendMinutes: 2.5, maxExtensions: undefined });
   assert.equal(r.values, null);
-  assert.deepEqual(r.errors.map((e) => e.key).sort(), ['baseMinutes', 'baseScreens', 'maxExtensions']);
+  assert.deepEqual(r.errors.map((e) => e.key).sort(), ['baseMinutes', 'extendMinutes', 'maxExtensions']);
 });
 
-test('validateLimits drops unknown keys', () => {
-  const r = DS.validateLimits({ ...GOOD, coolOffMs: 0 });
+test('validateLimits drops unknown keys, including old scroll limits', () => {
+  const r = DS.validateLimits({ ...GOOD, coolOffMs: 0, baseScreens: 30, extendScreens: 10 });
   assert.deepEqual(r.values, GOOD);
 });
 
@@ -81,4 +81,10 @@ test('once active, editing code defaults does not change saved limits', () => {
   const { settings } = DS.resolveSettings(p.settings, NOW + 2 * H);
   const cfg = DS.effectiveConfig(settings, { ...DS.CONFIG, baseMinutes: 999 });
   assert.equal(cfg.baseMinutes, 20);
+});
+
+test('settings saved by the older scroll-based version still resolve', () => {
+  const old = { active: { baseMinutes: 25, baseScreens: 30, extendMinutes: 5, extendScreens: 10, maxExtensions: 3 }, pending: null };
+  const { cfg } = DS.resolveSettings(old, NOW);
+  assert.deepEqual(DS.thresholds({ ...DS.emptyRecord(), extensions: 1 }, cfg), { ms: 30 * 60 * 1000 });
 });
