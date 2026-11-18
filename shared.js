@@ -12,6 +12,9 @@
     extendMinutes: 5,
     // After this many extensions, the next limit hit blocks until midnight.
     maxExtensions: 3,
+    // When the warning appears, "more minutes" stays locked this long, so
+    // extending is a decision, not a reflex.
+    extendCooldownMs: 2 * 60 * 1000,
     // Stop counting active time after this long without scroll/key/mouse input.
     idleMs: 60 * 1000,
     // Keep this many days of history in storage.
@@ -21,16 +24,6 @@
     // Opened by the browser after the extension is removed. Must be http(s);
     // a page inside the extension is gone by then. Empty = disabled.
     uninstallUrl: '',
-    // Philosophy quotes in the grown bar. false = built-in quotes only, and
-    // the extension makes no network requests at all.
-    onlineQuotes: true,
-    // How long each quote stays up. Long enough to actually read it.
-    quoteRotateMs: 60 * 1000,
-    // Fetch more quotes when the local pool is older than this, or smaller
-    // than quotePoolMin. Failed fetches are retried after quoteRetryMs.
-    quoteRefreshMs: 24 * 60 * 60 * 1000,
-    quotePoolMin: 20,
-    quoteRetryMs: 10 * 60 * 1000,
   };
 
   // User-editable limits and their allowed ranges (inclusive integers).
@@ -40,17 +33,76 @@
     maxExtensions: [0, 10],
   };
 
+  // Built-in sites. More can be added from the settings page (stored as
+  // `customSites` and keyed by their domain); they can't be removed there.
   const SITES = {
     youtube: 'youtube.com',
     reddit: 'reddit.com',
     linkedin: 'linkedin.com',
   };
 
-  function siteForHost(host) {
+  // To stop tracking a site that was added in settings, list its domain here
+  // and reload the extension. Removal is deliberately only possible in code.
+  const SITE_REMOVALS = [];
+
+  const MAX_CUSTOM_SITES = 20;
+
+  function hostMatches(host, domain) {
+    return host === domain || host.endsWith('.' + domain);
+  }
+
+  // Built-in sites map to their key ('youtube'); added sites to their domain.
+  function siteForHost(host, custom = []) {
     for (const [site, domain] of Object.entries(SITES)) {
-      if (host === domain || host.endsWith('.' + domain)) return site;
+      if (hostMatches(host, domain)) return site;
+    }
+    for (const domain of custom) {
+      if (hostMatches(host, domain)) return domain;
     }
     return null;
+  }
+
+  // "https://www.Instagram.com/explore" -> "instagram.com"; null if not a domain.
+  const DOMAIN_RE = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+
+  function normalizeDomain(input) {
+    if (typeof input !== 'string') return null;
+    let s = input.trim().toLowerCase();
+    s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, ''); // scheme
+    s = s.split(/[/?#]/)[0]; // path, query, fragment
+    s = s.replace(/:\d+$/, ''); // port
+    s = s.replace(/^www\./, '');
+    return DOMAIN_RE.test(s) ? s : null;
+  }
+
+  // Stored list -> clean list: valid, unique, and not removed in code.
+  function customSites(stored, removals = SITE_REMOVALS) {
+    if (!Array.isArray(stored)) return [];
+    const out = [];
+    for (const raw of stored) {
+      const d = normalizeDomain(raw);
+      if (d && !removals.includes(d) && !out.includes(d)) out.push(d);
+    }
+    return out;
+  }
+
+  function addCustomSite(list, input) {
+    const sites = customSites(list);
+    const domain = normalizeDomain(input);
+    if (!domain) return { sites, domain: null, error: 'Enter a site like instagram.com' };
+    if (siteForHost(domain)) return { sites, domain, error: `${domain} is already tracked (built in)` };
+    if (sites.some((d) => hostMatches(domain, d))) return { sites, domain, error: `${domain} is already added` };
+    if (sites.length >= MAX_CUSTOM_SITES) return { sites, domain, error: `You can add at most ${MAX_CUSTOM_SITES} sites` };
+    return { sites: [...sites, domain], domain, error: null };
+  }
+
+  function isKnownSite(site, custom) {
+    return Object.prototype.hasOwnProperty.call(SITES, site) || custom.includes(site);
+  }
+
+  // Patterns for permission requests and dynamic content scripts.
+  function matchPatterns(domain) {
+    return [`*://${domain}/*`, `*://*.${domain}/*`];
   }
 
   function pad(n) {
@@ -67,8 +119,10 @@
     return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0).getTime();
   }
 
+  // warnedAt: when the current warning started (0 = none); the extend
+  // cool-off runs from here.
   function emptyRecord() {
-    return { activeMs: 0, extensions: 0, blockedUntil: 0 };
+    return { activeMs: 0, extensions: 0, blockedUntil: 0, warnedAt: 0 };
   }
 
   function thresholds(rec, cfg) {
@@ -95,125 +149,59 @@
       activeMs: rec.activeMs + cleanDelta(delta.activeMs),
       extensions: rec.extensions,
       blockedUntil: rec.blockedUntil,
+      warnedAt: rec.warnedAt || 0,
     };
     let state = stateOf(next, cfg, now);
     if (state === 'warn' && next.extensions >= cfg.maxExtensions) {
       next.blockedUntil = endOfDay(now);
       state = 'blocked';
     }
+    if (state === 'warn' && !next.warnedAt) next.warnedAt = now; // cool-off starts
     return { rec: next, state };
+  }
+
+  // When "more minutes" unlocks for the current warning; 0 if no warning.
+  function extendAvailableAt(rec, cfg) {
+    return rec.warnedAt ? rec.warnedAt + cfg.extendCooldownMs : 0;
   }
 
   // seenExtensions: the count the requesting tab saw when it showed the
   // warning. If another tab already extended, this request is stale and is
-  // dropped so one warning can't burn two extensions.
+  // dropped so one warning can't burn two extensions. Refused until the
+  // cool-off for this warning has passed.
   function applyExtend(rec, seenExtensions, cfg, now) {
     const ok =
       stateOf(rec, cfg, now) === 'warn' &&
       rec.extensions < cfg.maxExtensions &&
-      rec.extensions === seenExtensions;
+      rec.extensions === seenExtensions &&
+      rec.warnedAt > 0 &&
+      now >= extendAvailableAt(rec, cfg);
     if (!ok) return { rec, applied: false };
-    return { rec: { ...rec, extensions: rec.extensions + 1 }, applied: true };
+    return { rec: { ...rec, extensions: rec.extensions + 1, warnedAt: 0 }, applied: true };
   }
 
   // ---- timer bar growth ---------------------------------------------------
-  // Percent of window height the timer bar takes as the limit nears: 0 (normal)
-  // below 80%, then 10/15/20/25 at 80/85/90/95%. After any extension the
-  // fraction drops (the limit grew), but the bar stays at the maximum.
-  const BAR_GROW_MAX = 25;
+  // Percent of window height the timer bar takes, by fraction of the day's
+  // allowance used: 0 (normal) up to 75%, then rising smoothly to 35% at
+  // 100%. After any extension the fraction drops (the limit grew), but the
+  // bar stays at the maximum.
+  const BAR_GROW_START = 0.75;
+  const BAR_GROW_MAX = 35;
 
   function barGrowPercent(fraction, extensions) {
     if (extensions > 0) return BAR_GROW_MAX;
-    if (!Number.isFinite(fraction) || fraction < 0.8) return 0;
-    const step = Math.floor(fraction * 20 + 1e-9); // 16 at 80%, 17 at 85%, ...
-    return Math.min(BAR_GROW_MAX, (step - 14) * 5);
+    if (!Number.isFinite(fraction) || fraction <= BAR_GROW_START) return 0;
+    return Math.min(BAR_GROW_MAX, ((fraction - BAR_GROW_START) / (1 - BAR_GROW_START)) * BAR_GROW_MAX);
   }
 
-  // ---- grown bar: colour stage ----------------------------------------------
-  // growPercent: from barGrowPercent. null while the bar is normal size.
-  function stageFor(growPercent, extensions) {
-    if (!(growPercent > 0)) return null;
-    if (extensions > 0 || growPercent >= 25) return 'stop';
-    return growPercent >= 15 ? 'caution' : 'calm';
-  }
-
-  // ---- grown bar: philosophy quotes -----------------------------------------
-  // Shown to read instead of the feed. The background keeps a pool fetched
-  // from two free APIs (see background.js); these built-in quotes cover the
-  // first moments, offline use, and the APIs being down.
-  const FALLBACK_QUOTES = [
-    { text: 'The unexamined life is not worth living.', author: 'Socrates' },
-    { text: 'It is not that we have a short time to live, but that we waste a lot of it.', author: 'Seneca' },
-    { text: 'Waste no more time arguing about what a good man should be. Be one.', author: 'Marcus Aurelius' },
-    { text: 'First say to yourself what you would be; and then do what you have to do.', author: 'Epictetus' },
-    { text: 'All of humanity\'s problems stem from man\'s inability to sit quietly in a room alone.', author: 'Blaise Pascal' },
-    { text: 'Life can only be understood backwards; but it must be lived forwards.', author: 'Soren Kierkegaard' },
-    { text: 'He who has a why to live can bear almost any how.', author: 'Friedrich Nietzsche' },
-    { text: 'A journey of a thousand miles begins with a single step.', author: 'Lao Tzu' },
-    { text: 'No man ever steps in the same river twice.', author: 'Heraclitus' },
-    { text: 'Very little is needed to make a happy life; it is all within yourself, in your way of thinking.', author: 'Marcus Aurelius' },
-    { text: 'One must imagine Sisyphus happy.', author: 'Albert Camus' },
-    { text: 'Man is condemned to be free.', author: 'Jean-Paul Sartre' },
-    { text: 'Whereof one cannot speak, thereof one must be silent.', author: 'Ludwig Wittgenstein' },
-    { text: 'I think, therefore I am.', author: 'Rene Descartes' },
-    { text: 'The only thing I know is that I know nothing.', author: 'Socrates' },
-    { text: 'We are what we repeatedly do.', author: 'Will Durant, on Aristotle' },
-  ];
-
-  const QUOTE_TEXT_MAX = 300;
-  const QUOTE_AUTHOR_MAX = 80;
-
-  // Validates untrusted API data. Returns a clean {text, author} or null.
-  function cleanQuote(q) {
-    if (!q || typeof q.text !== 'string' || typeof q.author !== 'string') return null;
-    const text = q.text.replace(/\s+/g, ' ').trim();
-    const author = q.author.replace(/\s+/g, ' ').trim();
-    if (text.length < 8 || text.length > QUOTE_TEXT_MAX) return null;
-    if (!author || author.length > QUOTE_AUTHOR_MAX) return null;
-    if (/[<>]/.test(text) || /[<>]/.test(author)) return null; // looks like markup
-    return { text, author };
-  }
-
-  // https://philosophyapi.pythonanywhere.com/api/ideas/?format=json&page=N
-  // -> { count, results: [{ id, quote, author }] }
-  function parsePhilosophyApi(json) {
-    if (!json || !Array.isArray(json.results)) return [];
-    return json.results.map((r) => cleanQuote({ text: r && r.quote, author: r && r.author })).filter(Boolean);
-  }
-
-  // https://www.stoic-quotes.com/api/quotes?num=N -> [{ text, author }]
-  function parseStoic(json) {
-    if (!Array.isArray(json)) return [];
-    return json.map(cleanQuote).filter(Boolean);
-  }
-
-  // Appends new quotes, drops duplicates (case-insensitive text), keeps the
-  // newest `max`.
-  function mergePool(existing, incoming, max = 200) {
-    const seen = new Set();
-    const out = [];
-    for (const q of [...(existing || []), ...(incoming || [])]) {
-      const key = q.text.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(q);
-    }
-    return out.slice(-max);
-  }
-
-  // Stored shape: { items: [{text, author}], fetchedAt, attemptAt }
-  function needsRefill(stored, now, cfg) {
-    if (!cfg.onlineQuotes) return false;
-    const s = stored || {};
-    if (now - (s.attemptAt || 0) < cfg.quoteRetryMs) return false;
-    const items = Array.isArray(s.items) ? s.items : [];
-    return items.length < cfg.quotePoolMin || now - (s.fetchedAt || 0) > cfg.quoteRefreshMs;
-  }
-
-  // Same quote in every tab at the same moment; changes every quoteRotateMs.
-  function pickQuote(pool, now, rotateMs = CONFIG.quoteRotateMs) {
-    if (!pool || !pool.length) return null;
-    return pool[Math.floor(now / rotateMs) % pool.length];
+  // ---- bar colour stage -----------------------------------------------------
+  // null (plain) below 75%, calm from 75%, caution from 85%, stop from 95%
+  // and after any extension.
+  function stageFor(fraction, extensions) {
+    if (extensions > 0) return 'stop';
+    if (!Number.isFinite(fraction) || fraction < BAR_GROW_START) return null;
+    if (fraction < 0.85) return 'calm';
+    return fraction < 0.95 ? 'caution' : 'stop';
   }
 
   // ---- settings with cool-off ---------------------------------------------
@@ -273,9 +261,9 @@
 
   const DS = {
     CONFIG, SITES, LIMIT_BOUNDS, siteForHost, dayKey, endOfDay, emptyRecord,
-    thresholds, stateOf, applyTick, applyExtend, barGrowPercent,
-    stageFor, FALLBACK_QUOTES, cleanQuote, parsePhilosophyApi, parseStoic,
-    mergePool, needsRefill, pickQuote,
+    thresholds, stateOf, applyTick, applyExtend, extendAvailableAt, barGrowPercent,
+    stageFor, SITE_REMOVALS, MAX_CUSTOM_SITES, normalizeDomain, customSites,
+    addCustomSite, isKnownSite, matchPatterns,
     validateLimits, effectiveConfig, resolveSettings, proposeLimits, cancelPending,
   };
 

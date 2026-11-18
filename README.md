@@ -14,36 +14,29 @@ Chromium-based browsers.
 1. **Measures.** On each supported site it counts active time: the tab is
    visible and focused, and you've scrolled, typed or moved the mouse in the
    last 60 seconds.
-2. **Shows a live timer.** A full-width bar sits at the very top of the page,
-   and the site starts below it:
-   **DoomedScroller** on the left, **Time wasted today** in the middle (time in soft red)
-   (updating every second), and **Total time for youtube** in green on the
-   right (the day's allowance, including extensions). It shows *paused* when
-   time isn't being counted, and stays visible over fullscreen video.
+2. **Shows a live timer.** One full-width bar sits at the very top of the
+   page, and the site starts below it: **DoomedScroller** on the left, **Time
+   wasted today** in the middle (updating every second), and **Total time for
+   youtube** on the right (the day's allowance, including extensions). It
+   shows *paused* when time isn't being counted, and stays visible over
+   fullscreen video.
 
-   **The bar grows as you near the limit,** squeezing the site into less of
-   the window: 10% of the window height at 80% of your time, then 15%, 20% and
-   25% at 85%, 90% and 95%. After you take an extension it stays at 25%.
-
-   The extra space shows **a philosophy quote to read instead of the feed**:
-   Kant, Nietzsche, Marcus Aurelius, Seneca and others, with the author's
-   name. Each quote stays up for 60 seconds, so there's time to actually read
-   and think about it. A strip along the bottom shows how much of today's time
-   is used. The background colour moves through three stages:
+   **From 75% of your time the bar grows,** smoothly, up to 35% of the window
+   height at the limit, squeezing the site into less of the window. After you
+   take an extension it stays at 35%. The time-wasted digits grow with it, a
+   strip along the bottom shows how much of the allowance is used, and the bar
+   takes on soft, low-glare colours:
 
    | Stage | When | Colour |
    |---|---|---|
-   | Calm | 80% | deep teal |
-   | Caution | 85–90% | amber |
-   | Stop | 95%+, or after an extension | muted crimson |
-
-   Quotes come from two free APIs (see [Privacy](#privacy) and
-   [Credits](#credits)), fetched about once a day and kept locally. If they're
-   unreachable, or `onlineQuotes` is off, a built-in set of classic quotes is
-   used instead.
+   | Calm | 75% | soft teal |
+   | Caution | 85% | warm sand |
+   | Stop | 95%+, or after an extension | muted rose |
 3. **Warns.** When a site reaches the day's limit (default: 15 min), a
-   full-screen overlay appears and pauses any video. You can close the tab or
-   take **5 more minutes**.
+   full-screen overlay appears and pauses any video. You can close the tab, or
+   take **5 more minutes**, but that button stays locked for the first **2
+   minutes** of the warning ("Come back in 1:59 to extend"), so extending is a
+   decision rather than a reflex.
 4. **Extends.** Each extension raises the limit (default: +5 min).
 5. **Blocks.** Hit the limit again after using all extensions (default: 3) and
    the site is blocked until midnight.
@@ -77,7 +70,7 @@ Firefox and Safari aren't supported.
 - **Toolbar popup:** minutes wasted, minutes left and extensions used per site,
   with the current status (ok / warn / blocked).
 - **Settings** (link in the popup, or right-click the icon → Options): change
-  the limits.
+  the limits, and add sites to track.
 
 ### Limit changes take 2 hours to apply
 
@@ -87,20 +80,26 @@ after you save them. Until then the old ones stay in force and the settings
 page shows a countdown. Saving again restarts the 2 hours. Cancelling a pending
 change takes effect immediately.
 
+### Adding sites
+
+In Settings, type a site (like `instagram.com`) and click **Add site**. Your
+browser asks you to allow access to that site; once you do, it's tracked like
+the built-in ones. Reload any tabs of that site that were already open.
+
+Sites **can't be removed from Settings**, on purpose: removing one is a
+decision you make with a clear head, not mid-urge. To remove a site, add its
+domain to `SITE_REMOVALS` in [`shared.js`](shared.js) and reload the
+extension; its access is released too.
+
 ## Privacy
 
-- **Your usage stays on your device.** Time spent is saved in the browser's
-  local extension storage and never sent anywhere. There's no server of ours,
-  no analytics and no account.
-- **Quote fetching is the only network traffic.** About once a day the
-  extension downloads quotes from `philosophyapi.pythonanywhere.com` and
-  `www.stoic-quotes.com`. These are plain requests with no cookies and nothing
-  about you or your browsing in them, but like any web request they reveal
-  your IP address to those services. Set `onlineQuotes: false` in `shared.js`
-  to turn this off; then the extension makes no network requests at all.
-- **Minimal permissions.** It asks for `storage` and access to the two quote
-  hosts above. Its page script runs only on `youtube.com`, `reddit.com` and
-  `linkedin.com`.
+- **Everything stays on your device.** Usage is saved in the browser's local
+  extension storage. The extension makes no network requests: no server, no
+  analytics, no account.
+- **Minimal permissions.** It asks for `storage`, and `scripting` to run its
+  timer on sites you add. Its script runs on `youtube.com`, `reddit.com` and
+  `linkedin.com`, plus only the sites you add yourself: access to each one is
+  requested when you add it, and never before.
 - **No content is read.** It records time only, not what you look at.
 - **History:** 30 days of daily totals are kept, then deleted.
 
@@ -113,13 +112,11 @@ Code-level defaults live in `CONFIG` at the top of [`shared.js`](shared.js):
 | `baseMinutes` | 15 | Warn after this many active minutes per site per day |
 | `extendMinutes` | 5 | Minutes added per extension |
 | `maxExtensions` | 3 | Extensions before the site is blocked |
+| `extendCooldownMs` | 2 min | How long "more minutes" stays locked after a warning |
 | `idleMs` | 60 000 | Stop counting time after this long with no input |
 | `coolOffMs` | 2 h | Delay before new limits apply |
 | `retainDays` | 30 | Days of history kept |
 | `uninstallUrl` | empty | Page the browser opens after the extension is removed |
-| `onlineQuotes` | true | Fetch philosophy quotes online; `false` = built-in quotes only, no network |
-| `quoteRotateMs` | 60 000 | How long each quote stays on screen |
-| `quoteRefreshMs` | 24 h | Fetch new quotes when the local pool is older than this |
 
 Once you've saved limits from the Settings page, those saved values are used
 instead of the code defaults.
@@ -167,6 +164,8 @@ background.js        service worker: the only code that writes to storage
 content.js           runs on the sites: measures time, shows the timer bar and overlay
 popup.html/.js       toolbar popup with today's stats
 options.html/.js     settings page
+icons/               extension icons (generated by tools/make_icons.py)
+tools/make_icons.py  draws the icons with Pillow
 uninstall-page/      optional page to host for after-uninstall
 test/                node:test unit tests
 ```
@@ -188,10 +187,15 @@ Design notes:
   browser APIs, so Node can test them directly.
 - **No HTML strings.** The timer bar and overlay are built element by element
   because YouTube rejects HTML assigned via `innerHTML` (Trusted Types).
-- **Fullscreen.** While a video is fullscreen the browser only draws that
+- **Fullscreen.** While an element is fullscreen the browser only draws that
   element, so the timer bar and overlay move inside it and move back on exit.
+  youtube.com instead makes the whole page fullscreen, which keeps the bar's
+  push-down; there the player area is shrunk to fit below the bar, so the
+  video gets smaller (letterboxed) instead of being cut off at the bottom.
 
-### Adding a site
+### Adding a built-in site
+
+Most people should use **Add site** in Settings. To ship a site built in:
 
 1. Add it to `SITES` in `shared.js`.
 2. Add its URL pattern to `content_scripts.matches` in `manifest.json`.
@@ -199,23 +203,9 @@ Design notes:
 
 ## Roadmap
 
-- Sites configurable from the settings page
 - Weekly history chart
 - Escalating friction (toast, then blur, then block)
-- Choose philosophy schools or authors for the quotes in settings
 - Store listing
-
-## Credits
-
-Philosophy quotes are fetched from these free, community-run APIs:
-
-- [Philosophy API](https://philosophyapi.pythonanywhere.com/api/): quotes from
-  philosophers across schools
-- [Stoic Quotes](https://www.stoic-quotes.com/): Marcus Aurelius, Seneca,
-  Epictetus
-
-Thanks to their maintainers. Please be gentle with them: the extension fetches
-about once a day.
 
 ## License
 

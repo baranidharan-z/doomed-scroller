@@ -3,14 +3,15 @@
 (async function () {
   const now = Date.now();
   const key = DS.dayKey(now);
-  const got = await chrome.storage.local.get([key, 'settings']);
+  const got = await chrome.storage.local.get([key, 'settings', 'customSites']);
   const day = got[key] || {};
   // Read-only view: resolve a due pending change for display; the background
   // persists the promotion on its next tick.
   const { cfg, settings } = DS.resolveSettings(got.settings, now);
   const tbody = document.getElementById('rows');
 
-  for (const site of Object.keys(DS.SITES)) {
+  // Built-in sites, then sites added in settings (keyed by domain).
+  for (const site of [...Object.keys(DS.SITES), ...DS.customSites(got.customSites)]) {
     const rec = { ...DS.emptyRecord(), ...(day[site] || {}) };
     const t = DS.thresholds(rec, cfg);
     const state = DS.stateOf(rec, cfg, now);

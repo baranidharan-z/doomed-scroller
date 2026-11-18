@@ -12,6 +12,8 @@
 importScripts('shared.js');
 
 const SETTINGS_KEY = 'settings';
+const SITES_KEY = 'customSites'; // domains added in settings
+const SCRIPT_ID = 'doomed-custom-sites'; // dynamic content script for them
 
 let chain = Promise.resolve();
 function serialized(fn) {
@@ -50,11 +52,24 @@ function reply(site, rec, state, cfg) {
     rec,
     thresholds: DS.thresholds(rec, cfg),
     maxExtensions: cfg.maxExtensions,
+    extendMinutes: cfg.extendMinutes,
+    extendAt: DS.extendAvailableAt(rec, cfg), // "more minutes" unlocks here
   };
+}
+
+async function loadCustomSites() {
+  const got = await chrome.storage.local.get(SITES_KEY);
+  return DS.customSites(got[SITES_KEY]);
+}
+
+// Messages name a site; only built-in or added sites may write records.
+async function isTracked(site) {
+  return typeof site === 'string' && DS.isKnownSite(site, await loadCustomSites());
 }
 
 function handleTick(msg) {
   return serialized(async () => {
+    if (!(await isTracked(msg.site))) return null;
     const now = Date.now();
     const { cfg } = await loadConfig(now);
     const key = DS.dayKey(now);
@@ -70,6 +85,7 @@ function handleTick(msg) {
 
 function handleExtend(msg) {
   return serialized(async () => {
+    if (!(await isTracked(msg.site))) return null;
     const now = Date.now();
     const { cfg } = await loadConfig(now);
     const key = DS.dayKey(now);
@@ -118,89 +134,6 @@ function handleCancelPending() {
   });
 }
 
-// ---- philosophy quotes -----------------------------------------------------
-// Pool of quotes fetched from two free APIs, stored locally and refreshed about
-// once a day. Fetches happen here (not in content scripts) so the page's CORS
-// rules don't apply; manifest host_permissions cover both hosts. Nothing about
-// the user is sent: these are plain GET requests with no parameters but a page
-// number. With CONFIG.onlineQuotes = false no request is ever made.
-
-const QUOTES_KEY = 'quotes';
-const FETCH_TIMEOUT_MS = 8000;
-const PHILOSOPHYAPI_PAGES = 17; // 254 quotes at 15 per page, as of 2026-11
-
-const QUOTE_SOURCES = [
-  {
-    name: 'philosophyapi',
-    url: () => 'https://philosophyapi.pythonanywhere.com/api/ideas/?format=json&page=' +
-      (1 + Math.floor(Math.random() * PHILOSOPHYAPI_PAGES)),
-    parse: DS.parsePhilosophyApi,
-  },
-  {
-    name: 'stoic-quotes',
-    url: () => 'https://www.stoic-quotes.com/api/quotes?num=20',
-    parse: DS.parseStoic,
-  },
-];
-
-async function fetchJson(url) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal, credentials: 'omit' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-let refilling = false; // in-memory guard; attemptAt in storage survives worker restarts
-
-async function refillQuotes() {
-  if (refilling) return;
-  refilling = true;
-  try {
-    const now = Date.now();
-    // Claim the attempt first so other tabs' requests don't start another.
-    const go = await serialized(async () => {
-      const stored = (await chrome.storage.local.get(QUOTES_KEY))[QUOTES_KEY];
-      if (!DS.needsRefill(stored, now, DS.CONFIG)) return false;
-      await chrome.storage.local.set({ [QUOTES_KEY]: { ...(stored || {}), attemptAt: now } });
-      return true;
-    });
-    if (!go) return;
-
-    const results = await Promise.allSettled(QUOTE_SOURCES.map(async (src) => src.parse(await fetchJson(src.url()))));
-    const incoming = [];
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') incoming.push(...r.value);
-      else console.warn('[doomed] quote source failed', { source: QUOTE_SOURCES[i].name, error: String(r.reason) });
-    });
-
-    await serialized(async () => {
-      const stored = (await chrome.storage.local.get(QUOTES_KEY))[QUOTES_KEY] || {};
-      const items = DS.mergePool(stored.items, incoming);
-      await chrome.storage.local.set({
-        [QUOTES_KEY]: { items, attemptAt: now, fetchedAt: incoming.length ? now : stored.fetchedAt || 0 },
-      });
-      console.info('[doomed] quotes refreshed', { added: incoming.length, pool: items.length });
-    });
-  } finally {
-    refilling = false;
-  }
-}
-
-function handleGetQuote() {
-  return serialized(async () => {
-    const stored = (await chrome.storage.local.get(QUOTES_KEY))[QUOTES_KEY];
-    // Top up in the background; the reply doesn't wait for the network.
-    refillQuotes().catch((e) => console.error('[doomed] quote refill failed', e));
-    const pool = stored && Array.isArray(stored.items) ? stored.items : [];
-    return { quote: DS.pickQuote(pool, Date.now()) };
-  });
-}
-
 async function pruneOldDays() {
   const all = await chrome.storage.local.get(null);
   const cutoff = DS.dayKey(Date.now() - DS.CONFIG.retainDays * 24 * 60 * 60 * 1000);
@@ -209,22 +142,95 @@ async function pruneOldDays() {
   if (stale.length) await chrome.storage.local.remove(stale);
 }
 
+// ---- sites added in settings ------------------------------------------------
+// The settings page requests host permission for the domain (it must, from
+// the click), then sends addSite. We store the domain and register the page
+// script for every added site we have permission for. Sites are removed only
+// by listing them in SITE_REMOVALS (shared.js); onStart drops them here.
+
+// Idempotent: replaces the registration with the current list.
+async function syncContentScripts() {
+  const sites = await loadCustomSites();
+  const granted = [];
+  for (const d of sites) {
+    if (await chrome.permissions.contains({ origins: DS.matchPatterns(d) })) granted.push(d);
+  }
+  const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [SCRIPT_ID] });
+  if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [SCRIPT_ID] });
+  if (granted.length) {
+    await chrome.scripting.registerContentScripts([{
+      id: SCRIPT_ID,
+      matches: granted.flatMap(DS.matchPatterns),
+      js: ['shared.js', 'content.js'],
+      runAt: 'document_idle',
+      persistAcrossSessions: true,
+    }]);
+  }
+  console.info('[doomed] custom sites registered', { sites: granted });
+}
+
+// Applies SITE_REMOVALS to the stored list and releases their site access.
+async function applySiteRemovals() {
+  const removed = await serialized(async () => {
+    const raw = (await chrome.storage.local.get(SITES_KEY))[SITES_KEY];
+    const all = DS.customSites(raw, []);
+    const kept = DS.customSites(raw);
+    if (kept.length !== all.length || !Array.isArray(raw) || raw.length !== kept.length) {
+      await chrome.storage.local.set({ [SITES_KEY]: kept });
+    }
+    return all.filter((d) => !kept.includes(d));
+  });
+  for (const d of removed) {
+    await chrome.permissions.remove({ origins: DS.matchPatterns(d) });
+    console.info('[doomed] site removed in code', { site: d });
+  }
+}
+
+function handleGetSites() {
+  return loadCustomSites().then((custom) => ({ builtIn: Object.values(DS.SITES), custom }));
+}
+
+// Replies { added, sites } or { message, sites } (message is shown to the user).
+async function handleAddSite(msg) {
+  const res = await serialized(async () => {
+    const stored = (await chrome.storage.local.get(SITES_KEY))[SITES_KEY];
+    const r = DS.addCustomSite(stored, msg.input);
+    if (r.error) return { message: r.error, sites: r.sites };
+    if (!(await chrome.permissions.contains({ origins: DS.matchPatterns(r.domain) }))) {
+      return { message: `Access to ${r.domain} wasn't granted, so it can't be tracked.`, sites: r.sites };
+    }
+    await chrome.storage.local.set({ [SITES_KEY]: r.sites });
+    console.info('[doomed] site added', { site: r.domain });
+    return { added: r.domain, sites: r.sites };
+  });
+  if (res.added) await syncContentScripts();
+  return res;
+}
+
 function onStart() {
   pruneOldDays().catch((e) => console.error('[doomed] prune failed', e));
+  applySiteRemovals()
+    .then(syncContentScripts)
+    .catch((e) => console.error('[doomed] syncing custom sites failed', e));
   // An empty string clears any previously set URL.
   chrome.runtime.setUninstallURL(DS.CONFIG.uninstallUrl)
     .catch((e) => console.error('[doomed] setUninstallURL failed', { url: DS.CONFIG.uninstallUrl }, e));
 }
 chrome.runtime.onInstalled.addListener(onStart);
 chrome.runtime.onStartup.addListener(onStart);
+// Site access revoked in the browser's own settings: stop injecting there.
+chrome.permissions.onRemoved.addListener(() => {
+  syncContentScripts().catch((e) => console.error('[doomed] syncing custom sites failed', e));
+});
 
 const HANDLERS = {
-  tick: (msg) => (DS.SITES[msg.site] ? handleTick(msg) : null),
-  extend: (msg) => (DS.SITES[msg.site] ? handleExtend(msg) : null),
+  tick: handleTick,
+  extend: handleExtend,
   getSettings: handleGetSettings,
   proposeLimits: handleProposeLimits,
   cancelPending: handleCancelPending,
-  getQuote: handleGetQuote,
+  getSites: handleGetSites,
+  addSite: handleAddSite,
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

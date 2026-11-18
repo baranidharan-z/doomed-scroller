@@ -11,11 +11,14 @@ const DS = require('../shared.js');
 
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
 const MIN = 60 * 1000;
+const BAR_H = 36; // normal bar height in content.js
+const VH = 800; // fake window.innerHeight
 
 class FakeStyle {
   constructor() { this.cssText = ''; }
   setProperty(k, v) { this[k] = v; }
   getPropertyValue(k) { return this[k] || ''; }
+  removeProperty(k) { delete this[k]; }
 }
 
 class FakeEl {
@@ -27,11 +30,15 @@ class FakeEl {
     this.listeners = {};
     this.isConnected = false;
     this.parentNode = null;
-    this.textContent = '';
+    this._text = '';
     this.hidden = false;
+    this.disabled = false;
+    this.className = '';
     this.shadow = null;
-    this.rect = { left: 0, top: 0, bottom: 0, width: 0, height: 0 };
   }
+  // Like the real DOM: setting textContent replaces the children.
+  get textContent() { return this._text; }
+  set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(c) {
     if (c.parentNode) c.parentNode.children = c.parentNode.children.filter((x) => x !== c);
     this.children.push(c);
@@ -41,6 +48,7 @@ class FakeEl {
   }
   append(...cs) { cs.forEach((c) => this.appendChild(typeof c === 'string' ? Object.assign(new FakeEl('#text'), { textContent: c }) : c)); }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
+  click() { (this.listeners.click || []).forEach((f) => f({ target: this })); }
   setAttribute(k, v) { this[k] = v; }
   remove() {
     if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((x) => x !== this);
@@ -48,7 +56,6 @@ class FakeEl {
     this.isConnected = false;
   }
   focus() {}
-  getBoundingClientRect() { return this.rect; }
   attachShadow() { this.shadow = new FakeEl('#shadow'); return this.shadow; }
   set innerHTML(_v) { throw new TypeError("This document requires 'TrustedHTML' assignment."); }
 }
@@ -56,6 +63,16 @@ class FakeEl {
 function allText(node) {
   if (!node || node.hidden) return ''; // hidden elements aren't visible
   return [node.textContent, ...node.children.map(allText), allText(node.shadow)].join(' ');
+}
+
+function walk(node, fn) {
+  if (!node) return null;
+  if (fn(node)) return node;
+  for (const c of node.children) {
+    const hit = walk(c, fn);
+    if (hit) return hit;
+  }
+  return walk(node.shadow, fn);
 }
 
 // The host element whose shadow DOM contains `needle`.
@@ -67,6 +84,9 @@ function findHost(root, needle) {
   }
   return null;
 }
+
+const byClass = (root, cls) => walk(root, (n) => String(n.className).split(' ').includes(cls));
+const button = (root, re) => walk(root, (n) => n.tagName === 'button' && re.test(allText(n)));
 
 // reply: a response object, or a function(msg) returning one / a promise.
 function makeEnv(reply, opts = {}) {
@@ -82,35 +102,38 @@ function makeEnv(reply, opts = {}) {
     hasFocus: () => true,
     addEventListener: (t, f) => { (docListeners[t] ||= []).push(f); },
     createElement: (t) => new FakeEl(t),
-    querySelector: () => null,
+    querySelector: (sel) => (opts.elements && opts.elements[sel]) || null,
     querySelectorAll: () => [],
     elementsFromPoint: () => opts.atTop || [],
   };
   const sent = [];
   const intervals = [];
+  const events = [];
   const ctx = {
     DS,
-    location: { hostname: 'www.youtube.com' },
+    location: { hostname: opts.hostname || 'www.youtube.com' },
     document,
-    window: { innerWidth: 1200, innerHeight: 800 },
+    window: { innerWidth: 1200, innerHeight: VH, dispatchEvent: (e) => { events.push(e.type); return true; } },
+    Event: class { constructor(type) { this.type = type; } },
     Element: FakeEl,
     getComputedStyle: (e) => e.computed,
     setInterval: (f, ms) => { intervals.push({ f, ms }); return intervals.length; },
     clearInterval: () => {},
     console: { info() {}, warn() {}, error() {}, log() {} },
-    chrome: { runtime: { id: 'test', sendMessage: async (m) => {
-      sent.push(m);
-      if (m.type === 'getQuote') return typeof opts.quote === 'function' ? opts.quote(m) : { quote: opts.quote || null };
-      return typeof reply === 'function' ? reply(m) : reply;
-    } } },
+    chrome: {
+      runtime: { id: 'test', sendMessage: async (m) => { sent.push(m); return typeof reply === 'function' ? reply(m) : reply; } },
+      storage: { local: { get: async () => opts.storage || {} } },
+    },
     Date: class extends Date { static now() { return clock.t; } },
   };
   vm.runInNewContext(SRC, ctx);
-  const flush = intervals.find((i) => i.ms === 5000).f;
-  const tick = intervals.find((i) => i.ms === 1000).f;
+  // Looked up lazily: for sites added in settings the script starts async.
+  const interval = (ms) => intervals.find((i) => i.ms === ms);
+  const flush = () => interval(5000).f();
+  const tick = () => interval(1000).f();
   const advance = (ms) => { clock.t += ms; tick(); };
   const fire = (type) => (docListeners[type] || []).forEach((f) => f({ target: document }));
-  return { sent, flush, tick, advance, fire, document, documentElement, clock };
+  return { sent, intervals, flush, tick, advance, fire, document, documentElement, clock, events };
 }
 
 const settle = () => new Promise((r) => setImmediate(r));
@@ -121,8 +144,14 @@ const OK = {
   rec: { activeMs: 1 * MIN, extensions: 0, blockedUntil: 0 },
   thresholds: { ms: 15 * MIN },
   maxExtensions: 3,
+  extendMinutes: 5,
 };
 const WARN = { ...OK, state: 'warn', rec: { ...OK.rec, activeMs: 15 * MIN } };
+const at = (activeMs, extra = {}) => ({ ...OK, rec: { ...OK.rec, activeMs, ...extra.rec }, ...extra.top });
+const barHost = (env) => findHost(env.documentElement, 'DoomedScroller');
+const barText = (env) => allText(barHost(env));
+const count = (text, re) => (text.match(new RegExp(re.source, 'g')) || []).length;
+const marginTop = (env) => env.documentElement.style['margin-top'];
 
 // ---- overlay and counting --------------------------------------------------
 
@@ -160,33 +189,106 @@ test('scroll counts as activity but no scroll distance is sent', async () => {
   assert.equal('screens' in last, false);
 });
 
-// ---- live timer bar ----------------------------------------------------------
+// ---- extend button cool-off ----------------------------------------------------
 
-const BAR_H = 36;
+test('extend button is locked with a countdown during the cool-off', async () => {
+  const clock = { t: 10_000_000 };
+  const env = makeEnv({ ...WARN, extendAt: clock.t + 2 * MIN }, { clock });
+  await settle();
+  const btn = button(env.documentElement, /Come back in/);
+  assert.ok(btn, 'locked button shown');
+  assert.equal(btn.disabled, true);
+  assert.match(allText(btn), /Come back in 2:00 to extend/);
+  env.advance(1000);
+  assert.match(allText(btn), /Come back in 1:59 to extend/);
+});
+
+test('extend button unlocks when the cool-off ends', async () => {
+  const clock = { t: 10_000_000 };
+  const env = makeEnv({ ...WARN, extendAt: clock.t + 2 * MIN }, { clock });
+  await settle();
+  for (let i = 0; i < 120; i++) env.advance(1000);
+  const btn = button(env.documentElement, /5 more minutes/);
+  assert.ok(btn, 'unlocked button shown');
+  assert.equal(btn.disabled, false);
+});
+
+test('clicking a locked extend button sends nothing', async () => {
+  const clock = { t: 10_000_000 };
+  const env = makeEnv({ ...WARN, extendAt: clock.t + 2 * MIN }, { clock });
+  await settle();
+  button(env.documentElement, /Come back in/).click();
+  await settle();
+  assert.equal(env.sent.filter((m) => m.type === 'extend').length, 0);
+});
+
+test('clicking an unlocked extend button asks the background to extend', async () => {
+  const clock = { t: 10_000_000 };
+  const env = makeEnv({ ...WARN, extendAt: clock.t - 1 }, { clock });
+  await settle();
+  button(env.documentElement, /5 more minutes/).click();
+  await settle();
+  assert.equal(env.sent.filter((m) => m.type === 'extend').length, 1);
+});
+
+// ---- sites added in settings --------------------------------------------------
+
+test('a site added in settings is tracked under its domain', async () => {
+  const env = makeEnv({ ...OK, site: 'instagram.com' }, { hostname: 'www.instagram.com', storage: { customSites: ['instagram.com'] } });
+  await settle(); await settle();
+  const ticks = env.sent.filter((m) => m.type === 'tick');
+  assert.ok(ticks.length >= 1);
+  assert.equal(ticks[0].site, 'instagram.com');
+  assert.match(barText(env), /Total time for instagram\.com/);
+});
+
+test('a site that is neither built in nor added does nothing', async () => {
+  const env = makeEnv(OK, { hostname: 'www.example.com', storage: { customSites: ['instagram.com'] } });
+  await settle(); await settle();
+  assert.equal(env.sent.length, 0);
+  assert.equal(env.intervals.length, 0);
+});
+
+test('a site removed in code is not tracked even if still stored', async () => {
+  // DS.customSites applies SITE_REMOVALS; an invalid stored entry stands in.
+  const env = makeEnv(OK, { hostname: 'bad', storage: { customSites: ['bad'] } });
+  await settle(); await settle();
+  assert.equal(env.sent.length, 0);
+});
+
+// ---- one bar: name | time wasted | total ---------------------------------------
 
 test('bar shows the name, time wasted today and total time for the site', async () => {
   const env = makeEnv(OK);
   await settle();
-  const text = allText(env.documentElement);
+  const text = barText(env);
   assert.match(text, /DoomedScroller/);
   assert.match(text, /Time wasted today/);
   assert.match(text, /\b1:00\b/);
   assert.match(text, /Total time for youtube/);
   assert.match(text, /\b15:00\b/);
-  assert.doesNotMatch(text, /left to waste/i);
+  assert.doesNotMatch(text, /time left/i);
+});
+
+test('there is one bar only: time wasted appears once, small or grown', async () => {
+  for (const ms of [1 * MIN, 13 * MIN]) {
+    const env = makeEnv(at(ms));
+    await settle();
+    assert.equal(count(allText(env.documentElement), /Time wasted today/), 1, `at ${ms / MIN} min`);
+  }
 });
 
 test('total time includes extensions', async () => {
   const env = makeEnv({ ...OK, rec: { ...OK.rec, extensions: 1 }, thresholds: { ms: 20 * MIN } });
   await settle();
-  assert.match(allText(env.documentElement), /\b20:00\b/);
+  assert.match(barText(env), /\b20:00\b/);
 });
 
 test('bar ticks every second without waiting for a flush', async () => {
   const env = makeEnv(OK);
   await settle();
   env.advance(1000);
-  assert.match(allText(env.documentElement), /\b1:01\b/);
+  assert.match(barText(env), /\b1:01\b/);
 });
 
 test('bar does not dip while a flush is in flight', async () => {
@@ -201,30 +303,107 @@ test('bar does not dip while a flush is in flight', async () => {
   for (let i = 0; i < 5; i++) env.advance(1000);
   const flushing = env.flush();
   await settle();
-  assert.match(allText(env.documentElement), /\b1:05\b/, 'in flight');
+  assert.match(barText(env), /\b1:05\b/, 'in flight');
   release();
   await flushing; await settle();
-  assert.match(allText(env.documentElement), /\b1:05\b/, 'after reply');
+  assert.match(barText(env), /\b1:05\b/, 'after reply');
 });
 
 test('bar shows paused when idle', async () => {
   const env = makeEnv(OK);
   await settle();
   env.advance(DS.CONFIG.idleMs + 1000);
-  assert.match(allText(env.documentElement), /paused/i);
+  assert.match(barText(env), /paused/i);
 });
 
 test('bar spans the full width at the very top and pushes the page down', async () => {
   const env = makeEnv(OK);
   await settle();
-  const bar = findHost(env.documentElement, 'DoomedScroller');
+  const bar = barHost(env);
   assert.ok(bar, 'bar host exists');
   assert.match(bar.style.cssText, /top:\s*0/);
   assert.match(bar.style.cssText, /left:\s*0/);
   assert.match(bar.style.cssText, /right:\s*0/);
   assert.match(bar.style.cssText, new RegExp(String.raw`height:\s*${BAR_H}px`));
-  assert.equal(env.documentElement.style['margin-top'], `${BAR_H}px`);
+  assert.equal(marginTop(env), `${BAR_H}px`);
 });
+
+test('html becomes the containing block so absolute app shells move down too', async () => {
+  // YouTube's ytd-app is position:absolute; top:0 with no positioned ancestor,
+  // which ignores the html margin unless html itself is positioned.
+  const env = makeEnv(OK);
+  await settle();
+  assert.equal(env.documentElement.style.position, 'relative');
+});
+
+// ---- gradual growth from 75% to 35% of window height ---------------------------
+
+test('bar is normal height below 75%', async () => {
+  const env = makeEnv(at(11 * MIN)); // 73%
+  await settle();
+  assert.equal(marginTop(env), `${BAR_H}px`);
+});
+
+test('bar grows gradually past 75%', async () => {
+  const a = makeEnv(at(12 * MIN)); // 80% -> 7% of 800 = 56px
+  const b = makeEnv(at(13 * MIN)); // 86.7% -> ~16.3% -> 132px (4px steps)
+  await settle();
+  assert.equal(marginTop(a), '56px');
+  assert.equal(marginTop(b), '132px');
+});
+
+test('bar reaches 35% of window height at the limit', async () => {
+  const env = makeEnv(at(15 * MIN));
+  await settle();
+  assert.equal(marginTop(env), `${0.35 * VH}px`);
+});
+
+test('bar stays at 35% after an extension', async () => {
+  const env = makeEnv(at(15 * MIN, { rec: { extensions: 1 }, top: { thresholds: { ms: 20 * MIN } } }));
+  await settle();
+  assert.equal(marginTop(env), `${0.35 * VH}px`);
+});
+
+test('bar colour stage: none, calm, caution, stop', async () => {
+  const cases = [[11 * MIN, null], [12 * MIN, 'calm'], [13.5 * MIN, 'caution'], [14.5 * MIN, 'stop']];
+  for (const [ms, stage] of cases) {
+    const env = makeEnv(at(ms));
+    await settle();
+    const bar = byClass(barHost(env).shadow, 'bar');
+    for (const s of ['calm', 'caution', 'stop']) {
+      assert.equal(String(bar.className).split(' ').includes(s), s === stage, `${ms / MIN} min: ${s}`);
+    }
+  }
+});
+
+test('time wasted gets bigger as the bar grows', async () => {
+  const sizeAt = async (ms) => {
+    const env = makeEnv(at(ms));
+    await settle();
+    return parseFloat(byClass(barHost(env).shadow, 'used').style.fontSize);
+  };
+  const small = await sizeAt(1 * MIN);
+  const mid = await sizeAt(13 * MIN);
+  const big = await sizeAt(15 * MIN);
+  assert.ok(mid > small, `${mid} > ${small}`);
+  assert.ok(big > mid, `${big} > ${mid}`);
+});
+
+test('pinned headers follow the bar as it grows', async () => {
+  const header = new FakeEl('ytd-masthead');
+  header.computed = { position: 'fixed', top: '0px' };
+  let r = at(11 * MIN);
+  const env = makeEnv(() => r, { atTop: [header] });
+  env.documentElement.appendChild(header); // attached, like a real header
+  await settle();
+  env.advance(1000);
+  assert.equal(header.style.top, `${BAR_H}px`);
+  r = at(13 * MIN);
+  await env.flush(); await settle();
+  assert.equal(header.style.top, '132px');
+});
+
+// ---- pinned elements ------------------------------------------------------------
 
 test('a site header pinned to the top is moved below the bar', async () => {
   const header = new FakeEl('ytd-masthead');
@@ -274,6 +453,8 @@ test('normal (non-pinned) elements are left alone', async () => {
   assert.equal(div.style.top, undefined);
 });
 
+// ---- fullscreen ---------------------------------------------------------------------
+
 test('bar moves into the fullscreen element and back', async () => {
   const env = makeEnv(OK);
   await settle();
@@ -299,122 +480,61 @@ test('warn overlay also shows inside the fullscreen element', async () => {
   assert.ok(findHost(player, 'doomscrolling'), 'overlay inside fullscreen element');
 });
 
-// ---- bar growth near the limit ---------------------------------------------
+// youtube.com fullscreens <html> itself, so the bar's margin stays and the
+// 100vh-tall player would be cut at the bottom. The player area is shrunk to
+// (100vh - bar) and a resize event makes the player re-fit the video.
+function fsEnv(reply) {
+  const container = new FakeEl('div');
+  const env = makeEnv(reply, { elements: { '#full-bleed-container': container } });
+  return { env, container };
+}
+const enterRootFullscreen = (env) => { env.document.fullscreenElement = env.documentElement; env.fire('fullscreenchange'); };
+const exitFullscreen = (env) => { env.document.fullscreenElement = null; env.fire('fullscreenchange'); };
 
-const VH = 800; // fake window.innerHeight
-const at = (activeMs, extra = {}) => ({ ...OK, rec: { ...OK.rec, activeMs, ...extra.rec }, ...extra.top });
-
-test('bar is normal height below 80%', async () => {
-  const env = makeEnv(at(11 * MIN));
+test('fullscreen of the whole page shrinks the video area to fit below the bar', async () => {
+  const { env, container } = fsEnv(OK);
   await settle();
-  const bar = findHost(env.documentElement, 'DoomedScroller');
-  assert.match(bar.style.cssText, new RegExp(String.raw`height:\s*${BAR_H}px`));
-  assert.equal(env.documentElement.style['margin-top'], `${BAR_H}px`);
+  enterRootFullscreen(env);
+  assert.equal(container.style.height, `calc(100vh - ${BAR_H}px)`);
+  assert.equal(container.style['max-height'], 'none');
+  assert.equal(env.events.filter((e) => e === 'resize').length, 1, 'player told to re-fit');
 });
 
-test('bar grows to 10% of window height at 80% and pushes the page further down', async () => {
-  const env = makeEnv(at(12 * MIN)); // 12 of 15 min = 80%
+test('in fullscreen the video area keeps shrinking as the bar grows', async () => {
+  let r = at(11 * MIN);
+  const { env, container } = fsEnv(() => r);
   await settle();
-  const bar = findHost(env.documentElement, 'DoomedScroller');
-  assert.match(bar.style.cssText, new RegExp(String.raw`height:\s*${0.10 * VH}px`));
-  assert.equal(env.documentElement.style['margin-top'], `${0.10 * VH}px`);
-});
-
-test('bar is 25% of window height at 95%', async () => {
-  const env = makeEnv(at(14.25 * MIN));
-  await settle();
-  assert.equal(env.documentElement.style['margin-top'], `${0.25 * VH}px`);
-});
-
-test('bar stays at 25% after an extension', async () => {
-  const env = makeEnv(at(15 * MIN, { rec: { extensions: 1 }, top: { thresholds: { ms: 20 * MIN } } }));
-  await settle();
-  assert.equal(env.documentElement.style['margin-top'], `${0.25 * VH}px`);
-});
-
-test('bar grows live as time ticks past 80%, and pinned headers follow it', async () => {
-  const header = new FakeEl('ytd-masthead');
-  header.computed = { position: 'fixed', top: '0px' };
-  const env = makeEnv(at(12 * MIN - 2000), { atTop: [header] });
-  env.documentElement.appendChild(header); // attached, like a real header
-  await settle();
-  env.advance(1000); // 79.99%: normal
-  assert.equal(header.style.top, `${BAR_H}px`);
-  env.advance(1000); // 80%: grows
-  assert.equal(env.documentElement.style['margin-top'], `${0.10 * VH}px`);
-  assert.equal(header.style.top, `${0.10 * VH}px`);
-});
-
-// ---- philosophy quotes in the grown bar ----------------------------------
-
-const QUOTE = { text: 'The test of a first-rate mind is patience.', author: 'Test Philosopher' };
-const quoteRequests = (env) => env.sent.filter((m) => m.type === 'getQuote').length;
-const barText = (env) => allText(findHost(env.documentElement, 'DoomedScroller'));
-
-test('normal-size bar shows no quote and does not fetch one', async () => {
-  const env = makeEnv(at(11 * MIN), { quote: QUOTE });
-  await settle(); await settle();
-  assert.doesNotMatch(barText(env), /Test Philosopher/);
-  assert.equal(quoteRequests(env), 0);
-});
-
-test('grown bar shows the quote and author from the background', async () => {
-  const env = makeEnv(at(12 * MIN), { quote: QUOTE });
-  await settle(); await settle();
-  const text = barText(env);
-  assert.match(text, /The test of a first-rate mind is patience\./);
-  assert.match(text, /Test Philosopher/);
-});
-
-test('grown bar shows a built-in quote while the background has not answered', async () => {
-  const env = makeEnv(at(12 * MIN), { quote: () => new Promise(() => {}) });
-  await settle();
-  const text = barText(env);
-  assert.ok(DS.FALLBACK_QUOTES.some((q) => text.includes(q.text)), 'a built-in quote is shown');
-});
-
-test('grown bar falls back to a built-in quote when the background has none', async () => {
-  const env = makeEnv(at(12 * MIN), { quote: null });
-  await settle(); await settle();
-  const text = barText(env);
-  assert.ok(DS.FALLBACK_QUOTES.some((q) => text.includes(q.text)), 'a built-in quote is shown');
-});
-
-test('quote is fetched once per rotation window, not every tick', async () => {
-  const R = DS.CONFIG.quoteRotateMs;
-  const clock = { t: Math.floor(5_000_000_000 / R) * R }; // start of a window
-  const env = makeEnv(at(12 * MIN), { quote: QUOTE, clock });
-  await settle(); await settle();
-  for (let i = 0; i < 10; i++) { env.advance(1000); await settle(); }
-  assert.equal(quoteRequests(env), 1);
-  clock.t += R; // next window
-  env.advance(0); await settle();
-  assert.equal(quoteRequests(env), 2);
-});
-
-test('quote disappears again if the bar returns to normal', async () => {
-  let r = at(12 * MIN);
-  const env = makeEnv(() => r, { quote: QUOTE });
-  await settle(); await settle();
-  assert.match(barText(env), /Test Philosopher/);
-  r = at(1 * MIN); // e.g. new day
+  enterRootFullscreen(env);
+  assert.equal(container.style.height, `calc(100vh - ${BAR_H}px)`);
+  r = at(13 * MIN);
   await env.flush(); await settle();
-  assert.doesNotMatch(barText(env), /Test Philosopher/);
+  assert.equal(container.style.height, 'calc(100vh - 132px)');
 });
 
-test('motivation lines and actions are gone', async () => {
-  const env = makeEnv(at(14.25 * MIN), { quote: QUOTE });
-  await settle(); await settle();
-  assert.doesNotMatch(barText(env), /Ippo idha pannu|Try this/);
-});
-
-// ---- page push-down: absolutely positioned app shells ------------------------
-
-test('html becomes the containing block so absolute app shells move down too', async () => {
-  // YouTube's ytd-app is position:absolute; top:0 with no positioned ancestor,
-  // which ignores the html margin unless html itself is positioned.
-  const env = makeEnv(OK);
+test('no repeated resize events while nothing changes', async () => {
+  const { env } = fsEnv(OK);
   await settle();
-  assert.equal(env.documentElement.style.position, 'relative');
-  assert.equal(env.documentElement.style['margin-top'], `${BAR_H}px`);
+  enterRootFullscreen(env);
+  env.advance(1000); env.advance(1000); env.advance(1000);
+  assert.equal(env.events.filter((e) => e === 'resize').length, 1);
+});
+
+test('leaving fullscreen restores the video area', async () => {
+  const { env, container } = fsEnv(OK);
+  await settle();
+  enterRootFullscreen(env);
+  exitFullscreen(env);
+  assert.equal(container.style.height, undefined);
+  assert.equal(container.style['max-height'], undefined);
+  assert.equal(env.events.filter((e) => e === 'resize').length, 2, 'player told to re-fit again');
+});
+
+test('fullscreen of a single element (not the page) leaves the video area alone', async () => {
+  const { env, container } = fsEnv(OK);
+  await settle();
+  const player = new FakeEl('div');
+  env.documentElement.appendChild(player);
+  env.document.fullscreenElement = player;
+  env.fire('fullscreenchange');
+  assert.equal(container.style.height, undefined);
 });

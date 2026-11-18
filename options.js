@@ -106,4 +106,73 @@
   }, 30 * 1000);
 
   load().catch((err) => showErrors([{ key: '', message: `Could not load settings: ${err.message}` }]));
+
+  // ---- sites ---------------------------------------------------------------
+  // Add only. Removing a site is done in code (SITE_REMOVALS in shared.js).
+
+  const sitesEl = document.getElementById('sites');
+  const siteForm = document.getElementById('siteForm');
+  const siteInput = document.getElementById('siteInput');
+  const siteError = document.getElementById('siteError');
+  const siteStatus = document.getElementById('siteStatus');
+  let customList = [];
+
+  function showSiteMessage(el, text) {
+    siteError.hidden = true;
+    siteStatus.hidden = true;
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = false;
+  }
+
+  function renderSites(builtIn, custom) {
+    const row = (domain, tagText) => {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.textContent = domain;
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = tagText;
+      li.append(name, tag);
+      return li;
+    };
+    sitesEl.replaceChildren(...builtIn.map((d) => row(d, 'built in')), ...custom.map((d) => row(d, 'added')));
+  }
+
+  async function loadSites() {
+    const res = await send({ type: 'getSites' });
+    customList = res.custom;
+    renderSites(res.builtIn, res.custom);
+  }
+
+  siteForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    showSiteMessage(null);
+    // Validate first, so we never ask for access we won't use.
+    const check = DS.addCustomSite(customList, siteInput.value);
+    if (check.error) {
+      showSiteMessage(siteError, check.error);
+      return;
+    }
+    // Must run straight from the click: the browser only shows the access
+    // prompt in response to a user gesture, so nothing is awaited before it.
+    chrome.permissions.request({ origins: DS.matchPatterns(check.domain) })
+      .then(async (granted) => {
+        if (!granted) {
+          showSiteMessage(siteError, `Access to ${check.domain} wasn't allowed, so it can't be tracked.`);
+          return;
+        }
+        const res = await send({ type: 'addSite', input: check.domain });
+        if (res.message) {
+          showSiteMessage(siteError, res.message);
+          return;
+        }
+        siteInput.value = '';
+        await loadSites();
+        showSiteMessage(siteStatus, `Added ${res.added}. Reload any open ${res.added} tabs to start tracking them.`);
+      })
+      .catch((err) => showSiteMessage(siteError, `Could not add the site: ${err.message}`));
+  });
+
+  loadSites().catch((err) => showSiteMessage(siteError, `Could not load sites: ${err.message}`));
 })();

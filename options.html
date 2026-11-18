@@ -23,6 +23,13 @@
     .secondary { background: #e6e6ec; color: #16161d; }
     .errors { color: #b3261e; margin: 12px 0 0; padding-left: 18px; }
     .status { color: #2a7a3a; margin-top: 12px; }
+    h1.section { margin-top: 36px; }
+    .sites { list-style: none; margin: 0 0 14px; padding: 0; }
+    .sites li { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
+    .tag { font-size: 12px; color: #777; background: #f0f0f4; border-radius: 999px; padding: 2px 8px; }
+    .add { display: flex; gap: 10px; }
+    .add input { flex: 1; }
+    .error-text { color: #b3261e; margin-top: 10px; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -42,6 +49,17 @@
       </div>
       <div class="status" id="status" hidden></div>
     </form>
+
+    <h1 class="section">Sites</h1>
+    <p class="sub">Add a site to track. Your browser will ask to allow access to it.
+      Sites can't be removed here, on purpose (see the README).</p>
+    <ul class="sites" id="sites"></ul>
+    <form id="siteForm" class="add" novalidate>
+      <input id="siteInput" placeholder="instagram.com" autocomplete="off" spellcheck="false" aria-label="Site to add">
+      <button class="primary" type="submit">Add site</button>
+    </form>
+    <div class="error-text" id="siteError" role="alert" hidden></div>
+    <div class="status" id="siteStatus" hidden></div>
   </main>
   <script src="shared.js"></script>
   <script src="options.js"></script>
