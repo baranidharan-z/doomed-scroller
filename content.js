@@ -49,15 +49,26 @@
       document.addEventListener(ev, onInput, { capture: true, passive: true });
     }
 
+    // Watching is wasting time too. A playing video gets no input (so the
+    // idle check would pause it after idleMs, e.g. in fullscreen), and the
+    // page can lose focus while it plays (pressing Alt on Windows moves focus
+    // to the browser's menu). So playing media on a visible tab counts.
+    function mediaPlaying() {
+      for (const m of document.querySelectorAll('video, audio')) {
+        if (!m.paused && !m.ended && m.readyState > 2) return true;
+      }
+      return false;
+    }
+
     function tick() {
       const now = Date.now();
       const dt = Math.min(now - lastTick, MAX_TICK_MS);
       lastTick = now;
+      const browsing = document.hasFocus() && now - lastInput < DS.CONFIG.idleMs;
       const active =
         document.visibilityState === 'visible' &&
-        document.hasFocus() &&
-        now - lastInput < DS.CONFIG.idleMs &&
-        !overlayVisible();
+        !overlayVisible() &&
+        (browsing || mediaPlaying());
       if (active) pendingMs += dt;
       counting = active;
       safeUpdateTimer();
@@ -67,6 +78,7 @@
       } catch (e) {
         console.error('[doomed] moving pinned elements failed', { site }, e);
       }
+      updateSubsLayout();
     }
 
     // ---- messaging ---------------------------------------------------------
@@ -499,8 +511,42 @@
       safeUpdateTimer();
     });
 
+    // ---- YouTube subscriptions: one big video per row ------------------------
+    // A wall of thumbnails invites skimming; one big video at a time slows it
+    // down. The grid's column count is --ytd-rich-grid-items-per-row, which
+    // YouTube's script also sets inline on the grid (hence !important), and
+    // items are capped at --ytd-rich-grid-item-max-width (500px by default),
+    // so that cap is raised to let the single video fill the width, limited so
+    // a thumbnail plus its title fit on one screen. YouTube has no CSS marker
+    // for this page, so the URL is checked and <html> is marked instead; it
+    // changes pages without reloading, hence the tick and yt-navigate-finish.
+    const SUBS_ATTR = 'data-doomed-subs';
+    const SUBS_CSS = `
+      html[${SUBS_ATTR}] ytd-rich-grid-renderer {
+        --ytd-rich-grid-items-per-row: 1 !important;
+        --ytd-rich-grid-posts-per-row: 1 !important;
+        --ytd-rich-grid-item-max-width: min(1000px, calc((100vh - 260px) * 16 / 9)) !important;
+      }`;
+    let subsStyle = null;
+
+    function updateSubsLayout() {
+      if (site !== 'youtube') return;
+      const on = location.pathname.startsWith('/feed/subscriptions');
+      const root = document.documentElement;
+      if (on && !subsStyle) {
+        subsStyle = document.createElement('style');
+        subsStyle.textContent = SUBS_CSS;
+        (document.head || root).appendChild(subsStyle);
+      }
+      if (on && !root.hasAttribute(SUBS_ATTR)) root.setAttribute(SUBS_ATTR, '');
+      if (!on && root.hasAttribute(SUBS_ATTR)) root.removeAttribute(SUBS_ATTR);
+    }
+
+    document.addEventListener('yt-navigate-finish', updateSubsLayout);
+
     // ---- start -------------------------------------------------------------
 
+    updateSubsLayout();
     timers.push(setInterval(tick, TICK_MS));
     timers.push(setInterval(flush, FLUSH_MS));
     flush(); // immediate: a blocked site should block on page load, not 5s later

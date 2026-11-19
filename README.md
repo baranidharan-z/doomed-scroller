@@ -11,9 +11,12 @@ Chromium-based browsers.
 
 ## How it works
 
-1. **Measures.** On each supported site it counts active time: the tab is
-   visible and focused, and you've scrolled, typed or moved the mouse in the
-   last 60 seconds.
+1. **Measures.** On each supported site it counts active time, while the tab
+   is visible and either:
+   - a video or audio is playing (fullscreen included, even if you don't touch
+     anything), or
+   - the page is focused and you've scrolled, typed or moved the mouse in the
+     last 60 seconds.
 2. **Shows a live timer.** One full-width bar sits at the very top of the
    page, and the site starts below it: **DoomedScroller** on the left, **Time
    wasted today** in the middle (updating every second), and **Total time for
@@ -67,6 +70,9 @@ Firefox and Safari aren't supported.
 ## Using it
 
 - **Timer bar** at the top of the site: time wasted today and total time allowed.
+- **YouTube subscriptions** (`youtube.com/feed/subscriptions`): one big video
+  per row instead of a wall of thumbnails, so you see one at a time. Other
+  YouTube pages keep the normal grid.
 - **Toolbar popup:** minutes wasted, minutes left and extensions used per site,
   with the current status (ok / warn / blocked).
 - **Settings** (link in the popup, or right-click the icon → Options): change
@@ -149,6 +155,10 @@ the top of the window (like YouTube's top bar) below the bar. Side effects:
   partly under the bar.
 - A pop-up menu that a site positions in page coordinates may appear lower by
   the bar's height.
+
+The one-video-per-row subscriptions layout relies on YouTube's grid settings
+(`--ytd-rich-grid-items-per-row`). If YouTube redesigns the page, it falls
+back to the normal grid.
 
 Issues and fixes are welcome.
 

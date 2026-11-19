@@ -49,7 +49,9 @@ class FakeEl {
   append(...cs) { cs.forEach((c) => this.appendChild(typeof c === 'string' ? Object.assign(new FakeEl('#text'), { textContent: c }) : c)); }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
   click() { (this.listeners.click || []).forEach((f) => f({ target: this })); }
-  setAttribute(k, v) { this[k] = v; }
+  setAttribute(k, v) { this[k] = v; (this.attrs ||= {})[k] = String(v); }
+  hasAttribute(k) { return !!this.attrs && k in this.attrs; }
+  removeAttribute(k) { if (this.attrs) delete this.attrs[k]; delete this[k]; }
   remove() {
     if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((x) => x !== this);
     this.parentNode = null;
@@ -103,15 +105,17 @@ function makeEnv(reply, opts = {}) {
     addEventListener: (t, f) => { (docListeners[t] ||= []).push(f); },
     createElement: (t) => new FakeEl(t),
     querySelector: (sel) => (opts.elements && opts.elements[sel]) || null,
-    querySelectorAll: () => [],
+    // Media elements the page has (fake <video>/<audio>), for 'video, audio'.
+    querySelectorAll: (sel) => (/video|audio/.test(sel) ? opts.media || [] : []),
     elementsFromPoint: () => opts.atTop || [],
   };
   const sent = [];
   const intervals = [];
   const events = [];
+  const location = { hostname: opts.hostname || 'www.youtube.com', pathname: opts.pathname || '/' };
   const ctx = {
     DS,
-    location: { hostname: opts.hostname || 'www.youtube.com' },
+    location,
     document,
     window: { innerWidth: 1200, innerHeight: VH, dispatchEvent: (e) => { events.push(e.type); return true; } },
     Event: class { constructor(type) { this.type = type; } },
@@ -133,7 +137,7 @@ function makeEnv(reply, opts = {}) {
   const tick = () => interval(1000).f();
   const advance = (ms) => { clock.t += ms; tick(); };
   const fire = (type) => (docListeners[type] || []).forEach((f) => f({ target: document }));
-  return { sent, intervals, flush, tick, advance, fire, document, documentElement, clock, events };
+  return { sent, intervals, flush, tick, advance, fire, document, documentElement, clock, events, location };
 }
 
 const settle = () => new Promise((r) => setImmediate(r));
@@ -537,4 +541,121 @@ test('fullscreen of a single element (not the page) leaves the video area alone'
   env.document.fullscreenElement = player;
   env.fire('fullscreenchange');
   assert.equal(container.style.height, undefined);
+});
+
+// ---- YouTube subscriptions: one big video per row ------------------------------
+// The grid's column count comes from --ytd-rich-grid-items-per-row, which
+// YouTube's own script also sets inline, so the override needs !important.
+
+const SUBS = '/feed/subscriptions';
+const subsStyle = (env) => walk(env.documentElement, (n) => n.tagName === 'style' && /items-per-row/.test(n.textContent));
+const subsOn = (env) => env.documentElement.hasAttribute('data-doomed-subs');
+
+test('subscriptions page gets one video per row', async () => {
+  const env = makeEnv(OK, { pathname: SUBS });
+  await settle();
+  assert.equal(subsOn(env), true);
+  const style = subsStyle(env);
+  assert.ok(style, 'layout style injected');
+  assert.match(style.textContent, /--ytd-rich-grid-items-per-row:\s*1\s*!important/);
+});
+
+test('the single video is allowed to be big (lifts the 500px item cap)', async () => {
+  const env = makeEnv(OK, { pathname: SUBS });
+  await settle();
+  assert.match(subsStyle(env).textContent, /--ytd-rich-grid-item-max-width:[^;]*!important/);
+});
+
+test('layout rules only apply while the page is marked as subscriptions', async () => {
+  const env = makeEnv(OK, { pathname: SUBS });
+  await settle();
+  const rules = subsStyle(env).textContent.split('}').filter((r) => r.includes('{'));
+  for (const r of rules) assert.match(r, /html\[data-doomed-subs\]/, r.trim());
+});
+
+test('other YouTube pages keep the normal grid', async () => {
+  for (const pathname of ['/', '/watch', '/feed/history', '/results']) {
+    const env = makeEnv(OK, { pathname });
+    await settle();
+    assert.equal(subsOn(env), false, pathname);
+  }
+});
+
+test('navigating to and away from subscriptions toggles the layout', async () => {
+  const env = makeEnv(OK, { pathname: '/' });
+  await settle();
+  assert.equal(subsOn(env), false);
+  env.location.pathname = SUBS; // YouTube changes pages without reloading
+  env.advance(1000);
+  assert.equal(subsOn(env), true);
+  env.location.pathname = '/watch';
+  env.fire('yt-navigate-finish');
+  assert.equal(subsOn(env), false);
+});
+
+test('other sites never get the YouTube layout', async () => {
+  const env = makeEnv({ ...OK, site: 'reddit' }, { hostname: 'www.reddit.com', pathname: SUBS });
+  await settle();
+  assert.equal(subsOn(env), false);
+  assert.equal(subsStyle(env), null);
+});
+
+// ---- watching counts: playing media is activity ------------------------------
+// Bug: watching a video (fullscreen or not) without touching anything paused
+// the timer after idleMs, and pressing Alt (focus moves to the browser's menu
+// on Windows) paused it too. Playing media on a visible tab now counts.
+
+const video = (playing) => ({ paused: !playing, ended: false, readyState: 4, pause() { this.paused = true; } });
+const sentMs = (env) => env.sent.filter((m) => m.type === 'tick').reduce((a, m) => a + m.activeMs, 0);
+
+test('a playing video keeps the timer running with no input past the idle limit', async () => {
+  const env = makeEnv(OK, { media: [video(true)] });
+  await settle();
+  const secs = DS.CONFIG.idleMs / 1000 + 30; // 90s of hands-off watching
+  for (let i = 0; i < secs; i++) env.advance(1000);
+  assert.doesNotMatch(barText(env), /paused/i);
+  await env.flush(); await settle();
+  assert.equal(sentMs(env), secs * 1000);
+});
+
+test('a playing video keeps counting when the page loses focus (e.g. Alt key)', async () => {
+  const env = makeEnv(OK, { media: [video(true)] });
+  await settle();
+  env.document.hasFocus = () => false;
+  env.advance(1000);
+  env.advance(1000);
+  assert.doesNotMatch(barText(env), /paused/i);
+  await env.flush(); await settle();
+  assert.equal(sentMs(env), 2000);
+});
+
+test('a paused video does not count once idle', async () => {
+  const env = makeEnv(OK, { media: [video(false)] });
+  await settle();
+  env.advance(DS.CONFIG.idleMs + 1000);
+  assert.match(barText(env), /paused/i);
+});
+
+test('browsing without media still pauses when the page loses focus', async () => {
+  const env = makeEnv(OK);
+  await settle();
+  env.document.hasFocus = () => false;
+  env.advance(1000);
+  assert.match(barText(env), /paused/i);
+});
+
+test('a hidden tab never counts, even with a video playing', async () => {
+  const env = makeEnv(OK, { media: [video(true)] });
+  await settle();
+  env.document.visibilityState = 'hidden';
+  env.advance(1000);
+  await env.flush(); await settle();
+  assert.equal(sentMs(env), 0);
+});
+
+test('a video that has ended or has no data yet does not count as playing', async () => {
+  const env = makeEnv(OK, { media: [{ paused: false, ended: true, readyState: 4, pause() {} }, { paused: false, ended: false, readyState: 1, pause() {} }] });
+  await settle();
+  env.advance(DS.CONFIG.idleMs + 1000);
+  assert.match(barText(env), /paused/i);
 });
